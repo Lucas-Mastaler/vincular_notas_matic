@@ -1,0 +1,14 @@
+selenium
+google-api-python-client
+google-auth
+google-auth-httplib2
+gspread
+oauth2client
+requests
+pandas
+tabulate
+openpyxl
+python-dotenv
+loguru
+beautifulsoup4
+packaging
