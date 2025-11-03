@@ -1151,16 +1151,30 @@ def main():
         _release_lock()
         logging.info("✅ main() — FIM")
 
+def _selftest_ping():
+    try:
+        logging.info("🩺 SELFTEST: iniciando ping")
+        # grava um carimbo na planilha (linha 1, col J)
+        SHEETS.values().update(
+            spreadsheetId=PLANILHA_ID,
+            range=f"'{ABA_CONTROLE}'!J1",
+            valueInputOption="RAW",
+            body={"values":[[dt.now().strftime("%d/%m/%Y %H:%M:%S")]]}
+        ).execute()
+        logging.info("🩺 SELFTEST: Sheets OK")
+        # cria log “vivo”
+        logging.info("🩺 SELFTEST: fim (OK)")
+    except Exception:
+        logging.exception("🩺 SELFTEST: falhou")
 
 # =========================================
 # Sessão 99.0 – Entry point (fora da função main)
 # =========================================
 if __name__ == "__main__":
-    # opcional: silenciar ruído do discovery
     logging.getLogger("googleapiclient.discovery").setLevel(logging.ERROR)
     logging.info("==== Iniciando matic_fluxo_integrado ====")
     try:
+        _selftest_ping()  # <- rode o ping primeiro
         main()
     except Exception:
         logging.exception("Falha na execução principal.")
-        # raise  # (opcional) re-levantar para o VSCode parar no erro
