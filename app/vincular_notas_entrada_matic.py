@@ -53,6 +53,85 @@ logging.basicConfig(
 # =========================================
 # Sessão 2.0 – Google Sheets util
 # =========================================
+from googleapiclient.errors import HttpError
+
+def _normalize_drive_folder_id(raw: str) -> str:
+    """
+    Aceita tanto o ID puro quanto uma URL do Drive e retorna só o ID.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    # URL do tipo https://drive.google.com/drive/folders/<ID>
+    m = re.search(r'/folders/([a-zA-Z0-9_-]+)', s)
+    if m:
+        return m.group(1)
+    # URL do tipo https://drive.google.com/drive/u/0/folders/<ID>
+    m = re.search(r'folders/([a-zA-Z0-9_-]+)', s)
+    if m:
+        return m.group(1)
+    # Se já parecer um ID curto: devolve como está
+    return s
+
+def _validate_env_or_fail():
+    missing = []
+    if not PLANILHA_ID:
+        missing.append("PLANILHA_ID")
+    if not ID_PASTA_GOOGLE_DRIVE:
+        missing.append("ID_PASTA_GOOGLE_DRIVE")
+    if missing:
+        logging.error(f"❌ Variáveis ausentes: {', '.join(missing)}")
+        logging.error("   → Defina no EasyPanel (Serviço > Variáveis de ambiente).")
+        raise SystemExit(2)
+
+def _selftest_ping():
+    """Ping simples: escreve timestamp na planilha para validar credencial/Sheets."""
+    try:
+        logging.info("🩺 SELFTEST: iniciando ping (Sheets)")
+        SHEETS.values().update(
+            spreadsheetId=PLANILHA_ID,
+            range=f"'{ABA_CONTROLE}'!J1",
+            valueInputOption="RAW",
+            body={"values":[[dt.now().strftime("%d/%m/%Y %H:%M:%S")]]}
+        ).execute()
+        logging.info("🩺 SELFTEST: Sheets OK")
+    except Exception:
+        logging.exception("🩺 SELFTEST: falhou")
+
+def _selftest_drive_list_one():
+    """Lista 1 XML na pasta do Drive para validar ID/permissão."""
+    try:
+        from app.google_sheets_auth import load_sa_credentials
+        logging.info("🩺 DRIVE: listando 1 arquivo .xml na pasta…")
+
+        # 👇 normaliza localmente (cobre caso ainda não tenha passado por main)
+        pasta_id = _normalize_drive_folder_id(ID_PASTA_GOOGLE_DRIVE)
+        if not pasta_id:
+            logging.error("❌ DRIVE selftest: ID_PASTA_GOOGLE_DRIVE vazio ou inválido.")
+            return
+
+        creds_drive = load_sa_credentials(["https://www.googleapis.com/auth/drive.readonly"])
+        drive = build("drive", "v3", credentials=creds_drive, cache_discovery=False)
+
+        q = (f"'{pasta_id}' in parents and trashed=false "
+             "and mimeType!='application/vnd.google-apps.folder' "
+             "and name contains '.xml'")
+        resp = drive.files().list(q=q, fields="files(id,name)", pageSize=1,
+                                  orderBy="modifiedTime desc").execute()
+        files = resp.get("files", [])
+        if not files:
+            logging.warning("🩺 DRIVE: 0 arquivos retornados (ID correto? pasta compartilhada com a conta de serviço?)")
+        else:
+            logging.info(f"🩺 DRIVE: OK → {files[0]['name']}")
+    except HttpError as e:
+        if getattr(e, "resp", None) and e.resp.status == 404:
+            logging.error("❌ DRIVE 404: pasta não encontrada OU sem permissão.")
+            logging.error("   → Verifique o ID e compartilhe a pasta com o e-mail da conta de serviço.")
+        else:
+            logging.exception("💥 DRIVE: erro ao listar arquivos")
+    except Exception:
+        logging.exception("💥 DRIVE: erro inesperado no selftest")
+
 from app.google_sheets_auth import load_sa_credentials, sheets_api
 
 SCOPES_SHEETS = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -146,42 +225,82 @@ def _get_or_create_row(nf, data_emissao=None):
 # =========================================
 def baixar_xmls_drive():
     from app.google_sheets_auth import load_sa_credentials
+    from googleapiclient.errors import HttpError
+
+    # 1) valida/normaliza ID da pasta
+    if not ID_PASTA_GOOGLE_DRIVE or not str(ID_PASTA_GOOGLE_DRIVE).strip():
+        logging.error("❌ ID_PASTA_GOOGLE_DRIVE vazio. Configure no EasyPanel.")
+        return
+
+    pasta_id = str(ID_PASTA_GOOGLE_DRIVE).strip()
+    m = re.search(r'/folders/([A-Za-z0-9_-]+)', pasta_id)
+    if m:
+        pasta_id = m.group(1)
+        logging.info(f"ℹ️ Normalizado ID_PASTA_GOOGLE_DRIVE → {pasta_id}")
+
+    # 2) credenciais + cliente Drive (somente leitura)
     os.makedirs(PASTA_LOCAL_XML, exist_ok=True)
-    creds_drive = load_sa_credentials(["https://www.googleapis.com/auth/drive"])
+    creds_drive = load_sa_credentials(["https://www.googleapis.com/auth/drive.readonly"])
     drive = build("drive", "v3", credentials=creds_drive, cache_discovery=False)
+
+    # 3) query – pega .xml que não estão marcados como (FEITO)
     q = (
-        f"'{ID_PASTA_GOOGLE_DRIVE}' in parents "
+        f"'{pasta_id}' in parents "
         "and trashed = false "
         "and mimeType != 'application/vnd.google-apps.folder' "
         "and name contains '.xml' "
         "and not name contains '(FEITO)'"
     )
 
-    for f in drive.files().list(q=q, fields="files(id,name)").execute().get("files", []):
+    logging.info(f"🔎 Drive: procurando XMLs na pasta {pasta_id} …")
+    try:
+        resp = drive.files().list(
+            q=q, fields="files(id,name)", pageSize=1000, orderBy="modifiedTime desc"
+        ).execute()
+        files = resp.get("files", [])
+    except HttpError as e:
+        if getattr(e, "resp", None) and e.resp.status == 404:
+            logging.error("❌ DRIVE 404: pasta não encontrada OU conta de serviço sem permissão.")
+            logging.error("   → Verifique o ID e compartilhe a pasta com o e-mail da conta de serviço.")
+        else:
+            logging.exception("💥 Erro ao listar arquivos no Drive")
+        return
+    except Exception:
+        logging.exception("💥 Erro inesperado ao listar arquivos no Drive")
+        return
+
+    if not files:
+        logging.info("📭 Drive: nenhum XML pendente (ou todos já estão com '(FEITO)').")
+        return
+
+    # 4) download + marcação na planilha
+    for f in files:
         nome    = f["name"]
         destino = os.path.join(PASTA_LOCAL_XML, nome)
 
+        # evita duplicar se já baixou/renomeou localmente
         if os.path.exists(destino) or os.path.exists(destino.replace(".xml", "(FEITO).xml")):
             continue
 
         data = drive.files().get_media(fileId=f["id"]).execute()
         with open(destino, "wb") as fh:
             fh.write(data)
-        logging.info(f"Baixado {nome}")
+        logging.info(f"⬇️ Baixado {nome}")
 
+        # tenta extrair NF e data e marcar "XML DRIVE" na planilha
         try:
             with open(destino, "rb") as fh:
                 tree = ET.parse(fh)
             ns = {"nfe": "http://www.portalfiscal.inf.br/nfe"}
-            nf  = tree.find(".//nfe:ide/nfe:nNF", ns).text
-            d_emis = tree.find(".//nfe:ide/nfe:dhEmi", ns).text[:10]
+            nf    = tree.find(".//nfe:ide/nfe:nNF", ns).text
+            d_emis = tree.find(".//nfe:ide/nfe:dhEmi", ns).text[:10]  # YYYY-MM-DD
             linha = _get_or_create_row(
                 nf,
                 dt.strptime(d_emis, "%Y-%m-%d").strftime("%d/%m/%Y")
             )
             _update_cell(linha, COL["XML DRIVE"], True)
         except Exception as e:
-            logging.warning(f"Não extrai dados de {nome}: {e}")
+            logging.warning(f"⚠️ Não foi possível extrair dados de {nome}: {e}")
 
 # =========================================
 # Sessão 4.0 – Funções SGI genéricas
@@ -1038,13 +1157,38 @@ def _release_lock():
     except Exception:
         pass
 
+# --- MAIN (versão com validação de ENV, logs claros e fallback robusto) -------
 def main():
     logging.info("🚀 main() — INÍCIO")
+
+    # Normaliza e valida ENV (inclui URL→ID da pasta do Drive)
+    global ID_PASTA_GOOGLE_DRIVE
+    _id_norm = _normalize_drive_folder_id(ID_PASTA_GOOGLE_DRIVE)
+    if _id_norm != ID_PASTA_GOOGLE_DRIVE:
+        logging.info(f"ℹ️ Normalizado ID_PASTA_GOOGLE_DRIVE → {_id_norm}")
+        ID_PASTA_GOOGLE_DRIVE = _id_norm
+
+    _validate_env_or_fail()
+
     if not _acquire_lock():
+        logging.warning("🔒 Lock ativo — encerrando para evitar concorrência.")
         return
     
     try:
-        baixar_xmls_drive()
+        # Baixa do Drive (com logs bem visíveis caso falhe)
+        logging.info("🔎 Iniciando baixar_xmls_drive()")
+        try:
+            baixar_xmls_drive()
+            logging.info("✅ baixar_xmls_drive() concluiu")
+        except HttpError as e:
+            if getattr(e, "resp", None) and e.resp.status == 404:
+                logging.error("❌ DRIVE 404 em baixar_xmls_drive(): ID inválido ou sem compartilhamento.")
+                return
+            logging.exception("💥 Erro HTTP em baixar_xmls_drive()")
+            return
+        except Exception:
+            logging.exception("💥 Erro inesperado em baixar_xmls_drive()")
+            return
 
         # 1) Existe algo pra processar?
         arquivos = [
@@ -1054,7 +1198,7 @@ def main():
             and "(ja_importado" not in a.lower()
         ]
         if not arquivos:
-            logging.info("Nenhum XML pendente para processar. Encerrando script.")
+            logging.info("📭 Nenhum XML pendente para processar (pasta local vazia após baixar do Drive).")
             return
 
         driver = novo_driver()
@@ -1140,10 +1284,9 @@ def main():
                 renomear_xmls()
                 renomear_feitos_no_drive()
 
-                # WhatsApp notification disabled in container mode
-                # (requires persistent Chrome profile and QR scan)
+                # WhatsApp notification desabilitado em container
                 if texto.strip():
-                    logging.info("Relatório gerado (WhatsApp desabilitado em container):")
+                    logging.info("Relatório gerado:")
                     logging.info(texto.strip())
 
         logging.info("Processo COMPLETO concluído!")
@@ -1152,30 +1295,21 @@ def main():
         _release_lock()
         logging.info("✅ main() — FIM")
 
-def _selftest_ping():
-    try:
-        logging.info("🩺 SELFTEST: iniciando ping")
-        # grava um carimbo na planilha (linha 1, col J)
-        SHEETS.values().update(
-            spreadsheetId=PLANILHA_ID,
-            range=f"'{ABA_CONTROLE}'!J1",
-            valueInputOption="RAW",
-            body={"values":[[dt.now().strftime("%d/%m/%Y %H:%M:%S")]]}
-        ).execute()
-        logging.info("🩺 SELFTEST: Sheets OK")
-        # cria log “vivo”
-        logging.info("🩺 SELFTEST: fim (OK)")
-    except Exception:
-        logging.exception("🩺 SELFTEST: falhou")
-
-# =========================================
-# Sessão 99.0 – Entry point (fora da função main)
-# =========================================
+# --- Entry point (chama selftests e depois o fluxo) ---------------------------
 if __name__ == "__main__":
     logging.getLogger("googleapiclient.discovery").setLevel(logging.ERROR)
     logging.info("==== Iniciando matic_fluxo_integrado ====")
+
+    # 👇 normaliza ANTES dos self-tests
+    _norm = _normalize_drive_folder_id(ID_PASTA_GOOGLE_DRIVE)
+    if _norm != ID_PASTA_GOOGLE_DRIVE:
+        logging.info(f"ℹ️ Normalizado ID_PASTA_GOOGLE_DRIVE (pré-selftest) → {_norm}")
+        ID_PASTA_GOOGLE_DRIVE = _norm
+
     try:
-        _selftest_ping()  # <- rode o ping primeiro
+        _selftest_ping()            # valida Sheets
+        _selftest_drive_list_one()  # valida Drive (ID/permissões)
         main()
     except Exception:
         logging.exception("Falha na execução principal.")
+
