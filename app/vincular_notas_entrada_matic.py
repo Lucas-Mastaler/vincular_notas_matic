@@ -45,7 +45,8 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.FileHandler(os.path.join(LOGS_DIR, dt.now().strftime("log_%Y-%m-%d_%H-%M-%S.txt")), encoding="utf-8"),
-        logging.StreamHandler(),
+        logging.FileHandler(os.path.join(LOGS_DIR, "latest.log"), encoding="utf-8"),
+        logging.StreamHandler(),  # stdout
     ],
 )
 
