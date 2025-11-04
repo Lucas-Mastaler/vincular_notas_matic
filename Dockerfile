@@ -41,5 +41,6 @@ RUN printf "SHELL=/bin/bash\nPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/
  && echo '*/30 7-19 * * * root cd /app && flock -n /app/.lock bash /app/app/run-once.sh >> /app/logs/cron.log 2>&1' >> /etc/cron.d/vincular-notas \
  && chmod 0644 /etc/cron.d/vincular-notas
 
-# 7) Mantém cron em foreground
-CMD ["cron", "-f"]
+# 7) Mantém cron em foreground e espelha logs no stdout do container
+CMD bash -lc 'mkdir -p /app/logs; touch /app/logs/cron.log /app/logs/latest.log; \
+cron -f & tail -F /app/logs/cron.log /app/logs/latest.log'
