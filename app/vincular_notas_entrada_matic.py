@@ -1298,7 +1298,7 @@ def main():
 # --- Entry point (chama selftests e depois o fluxo) ---------------------------
 if __name__ == "__main__":
     logging.getLogger("googleapiclient.discovery").setLevel(logging.ERROR)
-    logging.info("==== Iniciando matic_fluxo_integrado ====")
+    logging.info("==== Iniciando vincular_notas_entrada_matic ====")
 
     # 👇 normaliza ANTES dos self-tests
     _norm = _normalize_drive_folder_id(ID_PASTA_GOOGLE_DRIVE)
